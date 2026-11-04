@@ -335,6 +335,8 @@ select.inp{appearance:none;background-image:linear-gradient(45deg,transparent 50
 <div id="root"><div class="loading">Đang tải…</div></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script>
 (function(){
 "use strict";
@@ -520,6 +522,189 @@ function toast(msg){
   el.textContent = msg; el.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => el.hidden = true, 2600);
 }
 
+/* ---------- Supabase sync (email accounts, data per user via Row Level Security) ---------- */
+const SB_CFG = window.SUPABASE_CONFIG || {};
+let SB = null;
+try {
+  if (SB_CFG.url && SB_CFG.anonKey && window.supabase && typeof window.supabase.createClient === 'function')
+    SB = window.supabase.createClient(SB_CFG.url, SB_CFG.anonKey, {auth:{persistSession:true, autoRefreshToken:true, detectSessionInUrl:true}});
+} catch (e) { console.warn('Supabase init failed', e); SB = null; }
+const SB_TABLE = 'ledger_docs';
+
+function SupabaseStore(userId){
+  const queues = {};
+  let pending = 0;
+  function write(docId, getBody){
+    const q = queues[docId] || (queues[docId] = {running:false, dirty:false});
+    q.dirty = true; q.getBody = getBody;
+    if (q.running) return;
+    q.running = true; pending++;
+    (async () => {
+      let tries = 0;
+      while (q.dirty) {
+        q.dirty = false;
+        const body = q.getBody();
+        const res = body
+          ? await SB.from(SB_TABLE).upsert({user_id:userId, doc_id:docId, body, updated_at:new Date().toISOString()}, {onConflict:'user_id,doc_id'})
+          : await SB.from(SB_TABLE).delete().eq('user_id', userId).eq('doc_id', docId);
+        if (res && res.error) {
+          console.warn(res.error);
+          if (++tries <= 3) { q.dirty = true; await new Promise(r => setTimeout(r, 1000 * tries)); continue; }
+          toast('Không đồng bộ được, kiểm tra kết nối mạng');
+        } else tries = 0;
+      }
+      q.running = false; pending--;
+    })();
+  }
+  return {
+    kind:'supa',
+    busy(){ return pending > 0; },
+    async load(){
+      const {data, error} = await SB.from(SB_TABLE).select('doc_id, body').eq('user_id', userId);
+      if (error) throw error;
+      const out = {recurring:[], months:{}};
+      for (const r of data || []) {
+        const b = r.body || {};
+        if (r.doc_id === 'recurring') out.recurring = Array.isArray(b.items) ? b.items : [];
+        else if (r.doc_id.startsWith('m-')) out.months[r.doc_id.slice(2)] = {txns: Array.isArray(b.txns)?b.txns:[], paid: b.paid||{}};
+      }
+      return out;
+    },
+    async saveRecurring(){ write('recurring', () => ({items: S.recurring})); },
+    async saveMonth(ym){ write('m-'+ym, () => { const m = S.months[ym]; return (m && (m.txns.length || Object.keys(m.paid||{}).length)) ? {txns:m.txns, paid:m.paid||{}} : null; }); },
+    async wipe(){}
+  };
+}
+
+async function startSupa(user){
+  S.store = SupabaseStore(user.id); S.mode = 'supa'; S.userKey = user.id;
+  S.userName = (user.user_metadata && user.user_metadata.name) || user.email || 'Tài khoản của bạn';
+  S.userEmail = user.email || '';
+  S.recurring = []; S.months = {};
+  $('#root').innerHTML = '<div class="loading">Đang tải dữ liệu…</div>';
+  try { Object.assign(S, await S.store.load()); }
+  catch (e) { console.warn(e); toast('Chưa tải được dữ liệu, kiểm tra kết nối mạng'); }
+  renderApp();
+}
+// pull changes made on other devices when the app comes back to the foreground
+let lastPull = 0;
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || S.mode !== 'supa' || !S.store || S.store.busy() || $('#scrim')) return;
+  if (Date.now() - lastPull < 15000) return;
+  lastPull = Date.now();
+  try { const d = await S.store.load(); if (!S.store.busy() && S.mode === 'supa') { S.recurring = d.recurring; S.months = d.months; render(); } } catch {}
+});
+
+function authErrorText(e){
+  const m = String((e && e.message) || e || '');
+  if (/invalid login credentials/i.test(m)) return 'Sai email hoặc mật khẩu.';
+  if (/already registered|already been registered/i.test(m)) return 'Email này đã được đăng ký. Hãy đăng nhập.';
+  if (/email not confirmed/i.test(m)) return 'Email chưa được xác nhận. Mở thư xác nhận trong hộp thư của bạn rồi đăng nhập lại.';
+  if (/password should be at least|weak password/i.test(m)) return 'Mật khẩu quá yếu, cần ít nhất 6 ký tự.';
+  if (/rate limit|too many/i.test(m)) return 'Bạn thao tác quá nhanh, đợi một lát rồi thử lại.';
+  if (/failed to fetch|network/i.test(m)) return 'Không kết nối được máy chủ, kiểm tra mạng.';
+  return m || 'Có lỗi xảy ra, thử lại sau.';
+}
+
+function renderSupaAuth(mode='login'){
+  const titles = {login:'Đăng nhập', register:'Tạo tài khoản', forgot:'Quên mật khẩu'};
+  $('#root').innerHTML = `
+  <div class="auth wrap">
+    <div>
+      <div class="header-left" style="margin-bottom:16px"><div class="header-logo">${ICONS.logo}</div><div><div class="header-title">Sổ Thu Chi</div><p class="header-sub">Quản lý thu chi cá nhân</p></div></div>
+      <h1>${titles[mode]}</h1>
+      <p class="muted" style="margin:6px 0 0">${mode==='forgot' ? 'Nhập email đã đăng ký, chúng tôi sẽ gửi link đặt lại mật khẩu.' : 'Mỗi tài khoản có sổ thu chi riêng, đồng bộ giữa điện thoại và máy tính.'}</p>
+    </div>
+    <form class="card" id="sbForm" autocomplete="on">
+      ${mode==='register' ? `<div class="field"><label for="s-name">Tên hiển thị</label><input class="inp" id="s-name" maxlength="40" autocomplete="name" placeholder="VD: Nguyễn Minh"></div>` : ''}
+      <div class="field"><label for="s-email">Email</label><input class="inp" id="s-email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" placeholder="ban@example.com" required></div>
+      ${mode!=='forgot' ? `<div class="field"><label for="s-pass">Mật khẩu</label><input class="inp" id="s-pass" type="password" autocomplete="${mode==='register'?'new-password':'current-password'}" minlength="6" maxlength="72" placeholder="Ít nhất 6 ký tự" required></div>` : ''}
+      <div class="err" id="s-err" hidden></div>
+      <div class="banner" id="s-ok" hidden></div>
+      <button class="btn primary block" type="submit" id="s-submit">${mode==='login'?'Đăng nhập':mode==='register'?'Tạo tài khoản':'Gửi link đặt lại'}</button>
+      ${mode==='login' ? `<button class="link" type="button" id="s-forgot" style="align-self:center">Quên mật khẩu?</button>` : ''}
+      <button class="btn ghost block" type="button" id="s-switch">${mode==='login' ? 'Chưa có tài khoản? Tạo mới' : 'Đã có tài khoản? Đăng nhập'}</button>
+    </form>
+    <div class="card" style="gap:10px">
+      <div class="eyebrow">Chỉ muốn xem mẫu?</div>
+      <button class="btn block" type="button" id="a-demo" style="background:var(--purple-bg);border-color:rgba(163,113,247,.4);color:var(--purple)">Dùng thử ngay, không cần đăng ký</button>
+    </div>
+  </div>`;
+  $('#a-demo').onclick = startDemo;
+  $('#s-switch').onclick = () => renderSupaAuth(mode==='login' ? 'register' : 'login');
+  const fg = $('#s-forgot'); if (fg) fg.onclick = () => renderSupaAuth('forgot');
+  $('#sbForm').onsubmit = async e => {
+    e.preventDefault();
+    const err = $('#s-err'), ok = $('#s-ok'), btn = $('#s-submit');
+    err.hidden = true; ok.hidden = true;
+    const email = $('#s-email').value.trim().toLowerCase();
+    const pass = $('#s-pass') ? $('#s-pass').value : '';
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { err.textContent = 'Email không hợp lệ.'; err.hidden = false; return; }
+    if (mode !== 'forgot' && pass.length < 6) { err.textContent = 'Mật khẩu cần ít nhất 6 ký tự.'; err.hidden = false; return; }
+    btn.disabled = true;
+    try {
+      if (mode === 'login') {
+        const {data, error} = await SB.auth.signInWithPassword({email, password:pass});
+        if (error) throw error;
+        await startSupa(data.user);
+      } else if (mode === 'register') {
+        const name = ($('#s-name').value || '').trim();
+        const {data, error} = await SB.auth.signUp({email, password:pass, options:{data:{name}, emailRedirectTo: location.origin + location.pathname}});
+        if (error) throw error;
+        if (data.session) await startSupa(data.user);
+        else { ok.innerHTML = `<span>Đã gửi email xác nhận tới <b>${esc(email)}</b>. Bấm link trong thư rồi quay lại đăng nhập.</span>`; ok.hidden = false; }
+      } else {
+        const {error} = await SB.auth.resetPasswordForEmail(email, {redirectTo: location.origin + location.pathname});
+        if (error) throw error;
+        ok.innerHTML = `<span>Nếu <b>${esc(email)}</b> đã đăng ký, bạn sẽ nhận được link đặt lại mật khẩu.</span>`; ok.hidden = false;
+      }
+    } catch (ex) { err.textContent = authErrorText(ex); err.hidden = false; }
+    finally { const b = $('#s-submit'); if (b) b.disabled = false; }
+  };
+}
+
+function openNewPassword(){
+  const s = openSheet(`<div class="sheet-h"><h2>Đặt mật khẩu mới</h2><button class="x" aria-label="Đóng">×</button></div>
+    <div class="field"><label for="np-pass">Mật khẩu mới</label><input class="inp" id="np-pass" type="password" autocomplete="new-password" minlength="6" placeholder="Ít nhất 6 ký tự"></div>
+    <div class="err" id="np-err" hidden></div>
+    <button class="btn primary block" id="np-save">Lưu mật khẩu</button>`);
+  $('#np-save', s).onclick = async () => {
+    const p = $('#np-pass', s).value, err = $('#np-err', s);
+    if (p.length < 6) { err.textContent = 'Mật khẩu cần ít nhất 6 ký tự.'; err.hidden = false; return; }
+    const {error} = await SB.auth.updateUser({password:p});
+    if (error) { err.textContent = authErrorText(error); err.hidden = false; return; }
+    closeSheet(); toast('Đã đổi mật khẩu');
+  };
+}
+
+// copy a ledger kept on this device (old local account) into the signed-in Supabase account
+function localLedgers(){
+  const users = LS.get('stc.users', {});
+  return Object.keys(users).map(u => ({u, name: users[u].display || u, data: LS.get('stc.data.' + u, null)}))
+    .filter(x => x.data && ((x.data.recurring||[]).length || Object.values(x.data.months||{}).some(m => (m.txns||[]).length)));
+}
+function openImport(){
+  const list = localLedgers();
+  const s = openSheet(`<div class="sheet-h"><h2>Nhập dữ liệu từ máy này</h2><button class="x" aria-label="Đóng">×</button></div>
+    <p class="muted" style="margin:0">Chọn sổ đang lưu trên thiết bị này để đưa lên tài khoản ${esc(S.userEmail || S.userName)}. ${hasAnyData() ? '<b>Dữ liệu hiện có trên tài khoản sẽ được thay thế.</b>' : ''}</p>
+    <div class="list">${list.map(x => { const n = Object.values(x.data.months||{}).reduce((a,m)=>a+(m.txns||[]).length,0); return `<button class="item" data-imp="${esc(x.u)}"><span class="ico inc">${esc(initials(x.name))}</span><span class="grow"><div class="t">${esc(x.name)}</div><div class="s">${(x.data.recurring||[]).length} khoản cố định · ${n} khoản phát sinh</div></span></button>`; }).join('')}</div>`);
+  $$('[data-imp]', s).forEach(b => b.onclick = () => {
+    const x = list.find(y => y.u === b.dataset.imp);
+    closeSheet();
+    const go = () => {
+      const oldMonths = Object.keys(S.months);
+      S.recurring = x.data.recurring || []; S.months = {};
+      for (const [ym, m] of Object.entries(x.data.months || {})) S.months[ym] = {txns: m.txns || [], paid: m.paid || {}};
+      S.store.saveRecurring();
+      for (const ym of new Set([...oldMonths, ...Object.keys(S.months)])) S.store.saveMonth(ym);
+      render(); toast('Đã nhập dữ liệu, đang đồng bộ');
+    };
+    hasAnyData() ? confirmSheet('Thay thế dữ liệu hiện có?', 'Toàn bộ dữ liệu trên tài khoản sẽ được thay bằng sổ "' + x.name + '".', 'Thay thế', go) : go();
+  });
+}
+
+function showAuth(mode='login'){ return SB ? renderSupaAuth(mode) : renderAuth(mode); }
+
 /* ---------- boot ---------- */
 async function boot(){
   const cloud = await tryCloud();
@@ -529,6 +714,11 @@ async function boot(){
     catch (e) { console.warn(e); toast('Chưa tải được dữ liệu đám mây'); }
     renderApp();
     try { window.claude.use('sample').then(s => { if (s) { S.ask = s; if (S.tab === 'home') render(); } }).catch(() => {}); } catch {}
+  } else if (SB) {
+    SB.auth.onAuthStateChange(ev => { if (ev === 'PASSWORD_RECOVERY') setTimeout(openNewPassword, 400); });
+    let session = null;
+    try { session = (await SB.auth.getSession()).data.session; } catch (e) { console.warn(e); }
+    if (session) await startSupa(session.user); else renderSupaAuth();
   } else {
     const sess = LS.get('stc.session', null);
     const users = LS.get('stc.users', {});
@@ -651,7 +841,7 @@ const ICONS = {
 const fmtDateLong = () => new Intl.DateTimeFormat('vi-VN',{weekday:'long', day:'numeric', month:'long', year:'numeric'}).format(new Date());
 
 function renderApp(){
-  const badge = S.mode==='demo' ? ['mock','Chế độ xem thử'] : hasSample() ? ['mock','Dữ liệu mẫu'] : S.mode==='cloud' ? ['cloud','Đồng bộ đám mây'] : ['local','Lưu trên máy'];
+  const badge = S.mode==='demo' ? ['mock','Chế độ xem thử'] : hasSample() ? ['mock','Dữ liệu mẫu'] : (S.mode==='cloud'||S.mode==='supa') ? ['cloud','Đồng bộ đám mây'] : ['local','Lưu trên máy'];
   $('#root').innerHTML = `
   <div class="app">
     <header class="dashboard-header">
@@ -682,7 +872,7 @@ function renderApp(){
       </div>
     </header>
     <main class="wrap dashboard-main" id="view"></main>
-    <footer class="dashboard-footer wrap">Sổ Thu Chi · ${S.mode==='demo' ? 'Chế độ xem thử: dữ liệu mẫu, không được lưu lại' : S.mode==='cloud' ? 'Dữ liệu riêng của bạn, đồng bộ qua tài khoản Claude' : 'Dữ liệu lưu riêng cho tài khoản này trên thiết bị'}</footer>
+    <footer class="dashboard-footer wrap">Sổ Thu Chi · ${S.mode==='demo' ? 'Chế độ xem thử: dữ liệu mẫu, không được lưu lại' : S.mode==='supa' ? 'Dữ liệu riêng của bạn, đồng bộ giữa các thiết bị' : S.mode==='cloud' ? 'Dữ liệu riêng của bạn, đồng bộ qua tài khoản Claude' : 'Dữ liệu lưu riêng cho tài khoản này trên thiết bị'}</footer>
   </div>
   <nav class="nav" aria-label="Mục"><div class="nav-in">
     <button data-tab="home">${ICONS.home}Tổng quan</button>
@@ -705,7 +895,7 @@ function render(){
   $('#mText').textContent = ymLabel(S.ym);
   $$('[data-tab]').forEach(b => b.setAttribute('aria-current', b.dataset.tab === S.tab ? 'page' : 'false'));
   const sb = $('#srcBadge');
-  if (sb) { const b = S.mode==='demo' ? ['mock','Chế độ xem thử'] : hasSample() ? ['mock','Dữ liệu mẫu'] : S.mode==='cloud' ? ['cloud','Đồng bộ đám mây'] : ['local','Lưu trên máy']; sb.className = 'data-source-badge ' + b[0]; sb.textContent = b[1]; }
+  if (sb) { const b = S.mode==='demo' ? ['mock','Chế độ xem thử'] : hasSample() ? ['mock','Dữ liệu mẫu'] : (S.mode==='cloud'||S.mode==='supa') ? ['cloud','Đồng bộ đám mây'] : ['local','Lưu trên máy']; sb.className = 'data-source-badge ' + b[0]; sb.textContent = b[1]; }
   const v = $('#view');
   ({home:viewHome, list:viewList, fixed:viewFixed, stats:viewStats})[S.tab](v);
 }
@@ -728,6 +918,7 @@ function emptyState(){
     <h2 style="font-size:20px">Sổ của bạn đang trống</h2>
     <p class="muted">Bắt đầu bằng khoản lương hàng tháng: nhập một lần, các tháng sau tự có. Sau đó thêm các khoản chi cố định và chi phát sinh.</p>
     <button class="btn primary" data-act="add-salary">Nhập lương hàng tháng</button>
+    ${S.mode==='supa' && localLedgers().length ? `<button class="btn ghost" data-act="import">Nhập dữ liệu cũ từ máy này</button>` : ''}
     <button class="btn ghost" data-act="sample">Xem thử với dữ liệu mẫu</button>
   </div>`;
 }
@@ -736,12 +927,13 @@ function bindCommon(v){
     const a = b.dataset.act;
     if (a === 'add-salary') openTxnSheet({kind:'inc', fixed:true, category:'Lương'});
     if (a === 'sample') makeSample();
+    if (a === 'import') openImport();
     if (a === 'clear-sample') confirmSheet('Xóa dữ liệu mẫu?', 'Chỉ các khoản mẫu bị xóa, khoản bạn tự nhập vẫn giữ nguyên.', 'Xóa dữ liệu mẫu', clearSample);
     if (a === 'go-fixed') { S.tab='fixed'; render(); window.scrollTo(0,0); }
     if (a === 'go-list') { S.tab='list'; render(); window.scrollTo(0,0); }
     if (a === 'go-stats') { S.tab='stats'; render(); window.scrollTo(0,0); }
   });
-  const dr = $('#demoReg', v); if (dr) dr.onclick = () => { S.recurring = []; S.months = {}; S.mode = null; renderAuth('register'); };
+  const dr = $('#demoReg', v); if (dr) dr.onclick = () => { S.recurring = []; S.months = {}; S.mode = null; showAuth('register'); };
   $$('[data-entry]', v).forEach(b => b.onclick = e => {
     if (e.target.closest('.check')) return;
     openEntry(b.dataset.entry);
@@ -1327,10 +1519,12 @@ function openAccount(){
   const s = openSheet(`
     <div class="sheet-h"><h2>Tài khoản</h2><button class="x" aria-label="Đóng">×</button></div>
     <div class="row"><span class="ico exp" style="background:var(--surface-2);color:var(--fg)">${esc(initials(S.userName))}</span><div class="grow"><b>${esc(S.userName)}</b>
-      <div class="hint">${S.mode==='demo' ? 'Bạn đang xem thử với dữ liệu mẫu. Mọi thay đổi sẽ mất khi tải lại trang. Tạo tài khoản để lưu sổ riêng.' : S.mode==='cloud' ? 'Đăng nhập bằng tài khoản Claude. Dữ liệu được lưu riêng cho bạn và đồng bộ giữa các thiết bị.' : 'Tài khoản trên thiết bị này. Dữ liệu chỉ nằm trong trình duyệt hiện tại.'}</div></div></div>
+      <div class="hint">${S.mode==='demo' ? 'Bạn đang xem thử với dữ liệu mẫu. Mọi thay đổi sẽ mất khi tải lại trang. Tạo tài khoản để lưu sổ riêng.' : S.mode==='supa' ? 'Đăng nhập bằng ' + esc(S.userEmail) + '. Dữ liệu lưu riêng cho bạn trên máy chủ và đồng bộ giữa điện thoại, máy tính.' : S.mode==='cloud' ? 'Đăng nhập bằng tài khoản Claude. Dữ liệu được lưu riêng cho bạn và đồng bộ giữa các thiết bị.' : 'Tài khoản trên thiết bị này. Dữ liệu chỉ nằm trong trình duyệt hiện tại.'}</div></div></div>
     <div class="field"><span class="lab">Giao diện</span><div class="seg" id="themeSeg">${[['','Tối'],['light','Sáng']].map(([k,l])=>`<button data-th="${k}" aria-pressed="${(document.documentElement.dataset.theme==='light'?'light':'')===k}">${l}</button>`).join('')}</div></div>
     ${hasSample() ? `<button class="btn ghost block" id="acc-clear">Xóa dữ liệu mẫu</button>` : (!hasAnyData() ? `<button class="btn ghost block" id="acc-sample">Tạo dữ liệu mẫu để xem thử</button>` : '')}
-    ${S.mode==='local' ? `<button class="btn danger block" id="acc-out">Đăng xuất</button>` : S.mode==='demo' ? `<button class="btn primary block" id="acc-out">Thoát xem thử và tạo tài khoản</button>` : ''}
+    ${S.mode==='supa' && localLedgers().length ? `<button class="btn ghost block" id="acc-import">Nhập dữ liệu cũ từ máy này</button>` : ''}
+    ${S.mode==='supa' ? `<button class="btn ghost block" id="acc-pass">Đổi mật khẩu</button>` : ''}
+    ${S.mode==='local' || S.mode==='supa' ? `<button class="btn danger block" id="acc-out">Đăng xuất</button>` : S.mode==='demo' ? `<button class="btn primary block" id="acc-out">Thoát xem thử và tạo tài khoản</button>` : ''}
   `);
   $$('[data-th]', s).forEach(b => b.onclick = () => {
     const v = b.dataset.th; if (v) document.documentElement.dataset.theme = v; else document.documentElement.dataset.theme = 'dark';
@@ -1338,7 +1532,13 @@ function openAccount(){
   });
   const c = $('#acc-clear', s); if (c) c.onclick = () => { closeSheet(); clearSample(); };
   const sm = $('#acc-sample', s); if (sm) sm.onclick = () => { closeSheet(); makeSample(); };
-  const o = $('#acc-out', s); if (o) o.onclick = () => { const demo = S.mode==='demo'; if (!demo) LS.del('stc.session'); closeSheet(); S.recurring = []; S.months = {}; S.mode = null; renderAuth(demo ? 'register' : 'login'); };
+  const im = $('#acc-import', s); if (im) im.onclick = () => { closeSheet(); openImport(); };
+  const pw = $('#acc-pass', s); if (pw) pw.onclick = () => { closeSheet(); openNewPassword(); };
+  const o = $('#acc-out', s); if (o) o.onclick = async () => {
+    const demo = S.mode==='demo', supa = S.mode==='supa';
+    if (supa) { try { await SB.auth.signOut(); } catch {} } else if (!demo) LS.del('stc.session');
+    closeSheet(); S.recurring = []; S.months = {}; S.mode = null; S.store = null; showAuth(demo ? 'register' : 'login');
+  };
 }
 
 /* ---------- sample data ---------- */
