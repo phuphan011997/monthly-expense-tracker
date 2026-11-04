@@ -9,7 +9,7 @@
 <style>
 /* Layout: analytics dashboard — header bar, summary banner, ask box, filter bar, KPI grid,
    charts column + insights aside (stacks to one column on phones), detail table, footer.
-   Dark-first palette; light only when the viewer explicitly picks it. */
+   Dark and light palettes: follows the device setting unless the viewer picks one. */
 :root{
   --bg:#0d1117; --surface:#161b22; --surface-2:#1c2128; --surface-3:#21262d; --line:#30363d; --line-soft:#262c34;
   --fg:#e6edf3; --muted:#8b949e; --faint:#6e7681;
@@ -25,8 +25,20 @@
   --scrim:rgba(1,4,9,.66);
   --shadow:0 8px 24px rgba(1,4,9,.5);
   --f:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
-  color-scheme:dark;
+  --mode:dark; color-scheme:dark;
 }
+@media (prefers-color-scheme: light){:root:not([data-theme="dark"]){
+  --bg:#f6f8fa; --surface:#ffffff; --surface-2:#f6f8fa; --surface-3:#eef1f4; --line:#d0d7de; --line-soft:#e4e8ec;
+  --fg:#1f2328; --muted:#59636e; --faint:#818b98;
+  --blue:#0969da; --blue-bg:rgba(9,105,218,.1);
+  --green:#1a7f37; --green-bg:rgba(26,127,55,.1);
+  --purple:#8250df; --purple-bg:rgba(130,80,223,.1);
+  --orange:#bc4c00; --orange-bg:rgba(188,76,0,.1);
+  --yellow:#9a6700; --yellow-bg:rgba(154,103,0,.1);
+  --red:#cf222e; --red-bg:rgba(207,34,46,.1);
+  --inc-2:#0a8a96; --exp-2:#bf8700; --scrim:rgba(31,35,40,.45); --shadow:0 8px 24px rgba(140,149,159,.25);
+  --mode:light; color-scheme:light;
+}}
 :root[data-theme="light"]{
   --bg:#f6f8fa; --surface:#ffffff; --surface-2:#f6f8fa; --surface-3:#eef1f4; --line:#d0d7de; --line-soft:#e4e8ec;
   --fg:#1f2328; --muted:#59636e; --faint:#818b98;
@@ -36,8 +48,8 @@
   --orange:#bc4c00; --orange-bg:rgba(188,76,0,.1);
   --yellow:#9a6700; --yellow-bg:rgba(154,103,0,.1);
   --red:#cf222e; --red-bg:rgba(207,34,46,.1);
-  --inc-2:#0a8a96; --scrim:rgba(31,35,40,.45); --shadow:0 8px 24px rgba(140,149,159,.25);
-  color-scheme:light;
+  --inc-2:#0a8a96; --exp-2:#bf8700; --scrim:rgba(31,35,40,.45); --shadow:0 8px 24px rgba(140,149,159,.25);
+  --mode:light; color-scheme:light;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html{touch-action:manipulation;-webkit-text-size-adjust:100%;text-size-adjust:100%;height:100%}
@@ -68,6 +80,9 @@ svg.i{width:18px;height:18px;flex:none}
 .data-source-badge.mock{color:var(--yellow);border-color:rgba(227,179,65,.35);background:var(--yellow-bg)}
 .data-source-badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
 .header-date{margin:0;font-size:12px;color:var(--muted);white-space:nowrap}
+.theme-btn{width:34px;height:34px;border-radius:50%;border:1px solid var(--line);background:var(--surface-2);color:var(--muted);display:grid;place-items:center}
+.theme-btn:hover{color:var(--fg)}
+.theme-btn svg{width:17px;height:17px}
 .avatar{width:34px;height:34px;border-radius:50%;background:var(--surface-3);border:1px solid var(--line);display:grid;place-items:center;font-weight:700;font-size:12px}
 .subbar{display:flex;align-items:center;gap:12px;padding-block:0 12px;flex-wrap:wrap}
 .month{display:flex;align-items:center;gap:4px;background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:3px}
@@ -359,6 +374,8 @@ const CATS = {
 // 10 hues spaced around the wheel; categories beyond the 10 largest share a neutral grey
 const PALETTE = ['#4c8dff','#ff8a3d','#3fb950','#f066b5','#f2cc3d','#a371f7','#22c5d6','#b0e04c','#ff5c5c','#c9d1d9'];
 const PALETTE_REST = '#6e7681';
+const PALETTE_LIGHT = ['#2f6fea','#e8701a','#2da44e','#d6409f','#c99a06','#8250df','#0fa3b5','#6f9a12','#e5484d','#57606a'];
+const PALETTE_LIGHT_REST = '#afb8c1';
 const DAYS = ['CN','T2','T3','T4','T5','T6','T7'];
 
 /* ---------- helpers ---------- */
@@ -510,7 +527,9 @@ function colorRanks(){
 function catColor(name, kind){
   if (!colorCache) colorCache = colorRanks();
   const i = colorCache[kind].indexOf(name);
-  return i >= 0 && i < PALETTE.length ? PALETTE[i] : PALETTE_REST;
+  const light = colorCache.light ?? (colorCache.light = css('--mode') === 'light');
+  const pal = light ? PALETTE_LIGHT : PALETTE;
+  return i >= 0 && i < pal.length ? pal[i] : (light ? PALETTE_LIGHT_REST : PALETTE_REST);
 }
 function hasAnyData(){ return S.recurring.length > 0 || Object.values(S.months).some(m => m.txns.length); }
 function hasSample(){ return S.recurring.some(r=>r.sample) || Object.values(S.months).some(m => m.txns.some(t=>t.sample)); }
@@ -853,6 +872,7 @@ function renderApp(){
         <div class="header-right">
           <span class="data-source-badge ${badge[0]}" id="srcBadge">${badge[1]}</span>
           <p class="header-date">${esc(fmtDateLong())}</p>
+          <button class="theme-btn" id="themeBtn" type="button"></button>
           <button class="avatar" id="userBtn" aria-label="Tài khoản ${esc(S.userName)}">${esc(initials(S.userName))}</button>
         </div>
       </div>
@@ -887,12 +907,14 @@ function renderApp(){
   $('#addBtn').onclick = () => openTxnSheet();
   $('#addTop').onclick = () => openTxnSheet();
   $('#userBtn').onclick = openAccount;
+  $('#themeBtn').onclick = () => { const order = ['', 'light', 'dark']; const next = order[(order.indexOf(themePref()) + 1) % 3]; setTheme(next); toast('Giao diện: ' + THEME_LABEL[next]); };
   $$('[data-tab]').forEach(b => b.onclick = () => { S.tab = b.dataset.tab; render(); window.scrollTo(0,0); });
   render();
 }
 function render(){
   charts.forEach(c => c.destroy()); charts = []; colorCache = null;
   $('#mText').textContent = ymLabel(S.ym);
+  syncThemeUi();
   $$('[data-tab]').forEach(b => b.setAttribute('aria-current', b.dataset.tab === S.tab ? 'page' : 'false'));
   const sb = $('#srcBadge');
   if (sb) { const b = S.mode==='demo' ? ['mock','Chế độ xem thử'] : hasSample() ? ['mock','Dữ liệu mẫu'] : (S.mode==='cloud'||S.mode==='supa') ? ['cloud','Đồng bộ đám mây'] : ['local','Lưu trên máy']; sb.className = 'data-source-badge ' + b[0]; sb.textContent = b[1]; }
@@ -1520,15 +1542,14 @@ function openAccount(){
     <div class="sheet-h"><h2>Tài khoản</h2><button class="x" aria-label="Đóng">×</button></div>
     <div class="row"><span class="ico exp" style="background:var(--surface-2);color:var(--fg)">${esc(initials(S.userName))}</span><div class="grow"><b>${esc(S.userName)}</b>
       <div class="hint">${S.mode==='demo' ? 'Bạn đang xem thử với dữ liệu mẫu. Mọi thay đổi sẽ mất khi tải lại trang. Tạo tài khoản để lưu sổ riêng.' : S.mode==='supa' ? 'Đăng nhập bằng ' + esc(S.userEmail) + '. Dữ liệu lưu riêng cho bạn trên máy chủ và đồng bộ giữa điện thoại, máy tính.' : S.mode==='cloud' ? 'Đăng nhập bằng tài khoản Claude. Dữ liệu được lưu riêng cho bạn và đồng bộ giữa các thiết bị.' : 'Tài khoản trên thiết bị này. Dữ liệu chỉ nằm trong trình duyệt hiện tại.'}</div></div></div>
-    <div class="field"><span class="lab">Giao diện</span><div class="seg" id="themeSeg">${[['','Tối'],['light','Sáng']].map(([k,l])=>`<button data-th="${k}" aria-pressed="${(document.documentElement.dataset.theme==='light'?'light':'')===k}">${l}</button>`).join('')}</div></div>
+    <div class="field"><span class="lab">Giao diện</span><div class="seg" id="themeSeg">${[['','Theo máy'],['light','Sáng'],['dark','Tối']].map(([k,l])=>`<button data-th="${k}" aria-pressed="${themePref()===k}">${l}</button>`).join('')}</div></div>
     ${hasSample() ? `<button class="btn ghost block" id="acc-clear">Xóa dữ liệu mẫu</button>` : (!hasAnyData() ? `<button class="btn ghost block" id="acc-sample">Tạo dữ liệu mẫu để xem thử</button>` : '')}
     ${S.mode==='supa' && localLedgers().length ? `<button class="btn ghost block" id="acc-import">Nhập dữ liệu cũ từ máy này</button>` : ''}
     ${S.mode==='supa' ? `<button class="btn ghost block" id="acc-pass">Đổi mật khẩu</button>` : ''}
     ${S.mode==='local' || S.mode==='supa' ? `<button class="btn danger block" id="acc-out">Đăng xuất</button>` : S.mode==='demo' ? `<button class="btn primary block" id="acc-out">Thoát xem thử và tạo tài khoản</button>` : ''}
   `);
   $$('[data-th]', s).forEach(b => b.onclick = () => {
-    const v = b.dataset.th; if (v) document.documentElement.dataset.theme = v; else document.documentElement.dataset.theme = 'dark';
-    LS.set('stc.theme', v); closeSheet(); render();
+    setTheme(b.dataset.th); closeSheet();
   });
   const c = $('#acc-clear', s); if (c) c.onclick = () => { closeSheet(); clearSample(); };
   const sm = $('#acc-sample', s); if (sm) sm.onclick = () => { closeSheet(); makeSample(); };
@@ -1585,7 +1606,22 @@ function clearSample(){
 
 /* ---------- start ---------- */
 try { document.documentElement.lang = 'vi'; } catch {}
-try { const th = LS.get('stc.theme', ''); if (th === 'light') document.documentElement.dataset.theme = 'light'; } catch {}
+const HOST_THEME = document.documentElement.dataset.theme || '';
+const THEME_LABEL = {'':'Theo máy', light:'Sáng', dark:'Tối'};
+function themePref(){ const v = LS.get('stc.theme', ''); return v === 'light' || v === 'dark' ? v : ''; }
+function applyTheme(){
+  const v = themePref(), r = document.documentElement;
+  if (v) r.dataset.theme = v; else if (HOST_THEME) r.dataset.theme = HOST_THEME; else delete r.dataset.theme;
+}
+function setTheme(v){ LS.set('stc.theme', v || ''); applyTheme(); if (S.store && $('#view')) render(); else syncThemeUi(); }
+function syncThemeUi(){
+  const b = $('#themeBtn'), v = themePref(), light = css('--mode') === 'light';
+  if (b) { b.innerHTML = v === '' ? SV('<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>') : v === 'light' ? SV('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>') : SV('<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>');
+    b.title = b.ariaLabel = 'Giao diện: ' + THEME_LABEL[v] + ' (bấm để đổi)'; }
+  const m = document.querySelector('meta[name="theme-color"]'); if (m) m.content = light ? '#ffffff' : '#161b22';
+}
+try { applyTheme(); } catch {}
+try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => { if (!themePref()) { if (S.store && $('#view')) render(); else syncThemeUi(); } }); } catch {}
 try { new MutationObserver(() => { if (S.store && $('#view')) render(); }).observe(document.documentElement, {attributes:true, attributeFilter:['data-theme']}); } catch {}
 boot();
 })();
