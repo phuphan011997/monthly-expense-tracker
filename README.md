@@ -1,6 +1,6 @@
 # Monthly Expense Tracker
 
-Mobile-first web app for tracking monthly income and expenses (Vietnamese UI: "Sổ Thu Chi").
+Mobile-first web app for tracking monthly income and expenses (Vietnamese UI: "Quản lý thu chi").
 
 ## Features
 - Per-user accounts (register / log in); each account has its own ledger
